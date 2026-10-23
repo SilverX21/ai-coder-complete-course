@@ -2,17 +2,26 @@ import Image from "next/image";
 import portrait from "../public/profile.png";
 import { Chat } from "./chat";
 import { FloorPlan } from "./floor-plan";
+import { Year } from "./year";
 import { Arrow, Book, Branch, Cloud, Compass, Database, GitHub, Globe, Layout, LinkedIn, Mail, Pin, Server } from "./icons";
 
 // Personal data lives in .env.local (never committed). Generic fallbacks keep the
 // build working when the file is absent.
 const name = process.env.NEXT_PUBLIC_NAME ?? "Name Surname";
-const firstName = name.split(" ")[0];
+const [firstName, ...otherNames] = name.split(" ");
+const lastNames = otherNames.join(" ");
+const initials = name
+  .split(" ")
+  .filter(Boolean)
+  .map((part) => part[0])
+  .join("")
+  .toUpperCase();
 const location = process.env.NEXT_PUBLIC_LOCATION ?? "City, Country";
 const companyNow = process.env.NEXT_PUBLIC_CURRENT_COMPANY ?? "Company";
 const sector = process.env.NEXT_PUBLIC_COMPANY_ITSECTOR ?? "a software consultancy";
 const school = process.env.NEXT_PUBLIC_SCHOOL ?? "School";
 
+// Entries without a value are dropped, so a missing env var never renders a dead link.
 const profiles = [
   {
     name: "LinkedIn",
@@ -32,7 +41,9 @@ const profiles = [
     handle: process.env.NEXT_PUBLIC_EMAIL ?? "",
     href: `mailto:${process.env.NEXT_PUBLIC_EMAIL ?? ""}`,
   },
-];
+].filter((p) => p.handle && p.href);
+const linkedin = profiles.find((p) => p.name === "LinkedIn");
+const github = profiles.find((p) => p.name === "GitHub");
 
 const career = [
   {
@@ -136,7 +147,7 @@ export default function Home() {
       <a className="skip" href="#main">Skip to content</a>
       <header className="bar">
         <a href="#top" className="mark" aria-label={`${firstName}, back to top`}>
-          NA
+          {initials}
         </a>
         <nav aria-label="Sections">
           <a href="#about">About</a>
@@ -161,12 +172,16 @@ export default function Home() {
                 <a className="btn btn-signal" href="#career">
                   See my career <Arrow />
                 </a>
-                <a className="btn btn-ghost" href={profiles[0].href} target="_blank" rel="noreferrer">
-                  <LinkedIn /> LinkedIn
-                </a>
-                <a className="btn btn-ghost" href={profiles[1].href} target="_blank" rel="noreferrer">
-                  <GitHub /> GitHub
-                </a>
+                {linkedin && (
+                  <a className="btn btn-ghost" href={linkedin.href} target="_blank" rel="noreferrer">
+                    <LinkedIn /> LinkedIn
+                  </a>
+                )}
+                {github && (
+                  <a className="btn btn-ghost" href={github.href} target="_blank" rel="noreferrer">
+                    <GitHub /> GitHub
+                  </a>
+                )}
               </div>
             </div>
             <FloorPlan />
@@ -174,10 +189,10 @@ export default function Home() {
           <div className="wrap name-box">
           <h1 className="name" aria-label={name}>
             <span className="name-line">
-              <span>{name.split(" ")[0]}</span>
+              <span>{firstName}</span>
             </span>{" "}
             <span className="name-line">
-              <span>{name.split(" ")[1]}</span>
+              <span>{lastNames}</span>
             </span>
           </h1>
           </div>
@@ -249,7 +264,7 @@ export default function Home() {
             </h2>
             <ol className="timeline">
               {career.map((c, i) => (
-                <li key={c.company} className={i === 0 ? "job job-now" : "job"}>
+                <li key={`${c.from}-${c.role}`} className={i === 0 ? "job job-now" : "job"}>
                   <div className="job-years">
                     <span>{c.from}</span>
                     <span className="job-to">{c.to}</span>
@@ -364,7 +379,9 @@ export default function Home() {
 
       <Chat />
       <footer className="foot wrap">
-        <span>© {new Date().getFullYear()} {name}</span>
+        <span>
+          © <Year built={new Date().getFullYear()} /> {name}
+        </span>
         <span>{location}</span>
       </footer>
     </>

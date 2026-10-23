@@ -1187,3 +1187,10 @@ body::after {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.twin-note {
+  margin: 0;
+  padding: 0 14px 12px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--steel-light);
+}
