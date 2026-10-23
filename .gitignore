@@ -11,3 +11,6 @@ graphify-out/
 .DS_Store
 .vscode/
 .idea/
+site/Nuno Araújo CV.pdf
+# Personal site assets (kept local)
+site/public/profile.png
