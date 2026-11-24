@@ -10,12 +10,21 @@ import {
   stripThinking,
   type ChatMessage,
 } from "./guard";
+import { openRouterChunks, responseUnsafe, visibleSoFar } from "./stream";
 
 // Free models are often rate-limited upstream (shared pool, HTTP 429). OpenRouter tries these in order.
 const MODELS = ["nvidia/nemotron-3.5-super-vl:free", "nvidia/nemotron-3-ultra-550b-a55b:free", "dots-studio/dots-3-note-preview:free"];
 
-// The global cap stays below OpenRouter's 1000 free requests a day, so the twin never burns the whole quota.
-const rateLimited = createRateLimiter({ perMinute: 8, perDay: 120, globalPerDay: 800 });
+// Second opinion on every reply before it is final. Fails open: if the guard is down, the other layers still apply.
+const GUARD_MODEL = "nvidia/nemotron-3.5-content-safety:free";
+// Usually 1-4s, but the free queue sometimes stalls for 15s or more; then the reply goes out unguarded.
+const GUARD_TIMEOUT_MS = 10_000;
+const UPSTREAM_TIMEOUT_MS = 45_000;
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+// Each question costs two OpenRouter requests (answer + guard). 400 questions stay below the
+// 1000 free requests a day, so the twin never burns the whole quota.
+const rateLimited = createRateLimiter({ perMinute: 8, perDay: 120, globalPerDay: 400 });
 
 const env = process.env;
 // Server-side route: env comes from the runtime environment, so a plain alias is fine here.
@@ -80,6 +89,55 @@ const signer = createSigner(
 
 const leaksPrompt = createLeakDetector(rules, CANARY);
 
+const openRouterHeaders = () => ({
+  Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+  "Content-Type": "application/json",
+  "HTTP-Referer": env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000",
+  "X-Title": `${name} Digital Twin`,
+});
+
+// True when the guard model flags the reply as unsafe in the context of the question.
+async function moderate(question: string, reply: string): Promise<boolean> {
+  try {
+    const response = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: openRouterHeaders(),
+      signal: AbortSignal.timeout(GUARD_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GUARD_MODEL,
+        messages: [
+          { role: "user", content: question },
+          { role: "assistant", content: reply },
+        ],
+        max_tokens: 60,
+        // It reasons by default, which eats the token budget and doubles the wait for a one-line verdict.
+        reasoning: { effort: "none" },
+      }),
+    });
+    const data = await response.json();
+    const verdict = data.choices?.[0]?.message?.content;
+    if (!response.ok || typeof verdict !== "string") {
+      console.warn(`Guard model unavailable (HTTP ${response.status}):`, JSON.stringify(data.error ?? data));
+      return false;
+    }
+    return responseUnsafe(verdict);
+  } catch (err) {
+    console.warn("Guard model request failed:", err);
+    return false;
+  }
+}
+
+// One JSON object per line: delta (append), replace (swap the shown text), checking (guard model
+// running), done (final reply and signed token), error. The client treats "done" as the only authoritative reply.
+type StreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "replace"; text: string }
+  | { type: "checking" }
+  | { type: "done"; reply: string; token: string }
+  | { type: "error"; error: string };
+
+const UNREACHABLE = "The twin is unreachable right now. Try again.";
+
 export async function POST(request: Request) {
   if (!process.env.OPENROUTER_API_KEY) {
     return Response.json({ error: "Chat is not configured (missing API key)." }, { status: 500 });
@@ -120,16 +178,16 @@ export async function POST(request: Request) {
     return Response.json({ error: "Bad conversation." }, { status: 400 });
   }
 
-  let reply: string;
+  // Stop paying for tokens nobody will read when the visitor leaves.
+  const upstream = new AbortController();
+  request.signal.addEventListener("abort", () => upstream.abort());
+
+  let response: Response;
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    response = await fetch(OPENROUTER_URL, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000",
-        "X-Title": `${name} Digital Twin`,
-      },
+      headers: openRouterHeaders(),
+      signal: AbortSignal.any([upstream.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]),
       body: JSON.stringify({
         models: MODELS,
         messages: [
@@ -140,31 +198,105 @@ export async function POST(request: Request) {
         ],
         temperature: 0.4,
         max_tokens: 600,
+        stream: true,
       }),
     });
-
-    const data = await response.json();
-    if (!response.ok || data.error) {
-      // JSON.stringify: the dev log shows nested error objects as {}
-      console.error(`OpenRouter error (HTTP ${response.status}):`, JSON.stringify(data.error ?? data));
-      if (response.status === 429 || data.error?.code === 429) {
-        // retryable: upstream pools free up within seconds, unlike the daily cap above
-        return Response.json({ error: "The twin is busy right now. Try again in a minute.", retryable: true }, { status: 503 });
-      }
-      return Response.json({ error: "The twin is unreachable right now. Try again." }, { status: 502 });
-    }
-
-    reply = stripThinking(String(data.choices?.[0]?.message?.content ?? ""));
-    if (!reply) {
-      return Response.json({ error: "The twin went quiet on that one. Try rephrasing." }, { status: 502 });
-    }
-    if (leaksPrompt(reply)) reply = REFUSAL;
-    if (reply.length > MAX_REPLY_CHARS) reply = `${reply.slice(0, MAX_REPLY_CHARS - 1).trimEnd()}…`;
   } catch (err) {
     console.error("OpenRouter request failed:", err);
-    return Response.json({ error: "The twin is unreachable right now. Try again." }, { status: 502 });
+    return Response.json({ error: UNREACHABLE }, { status: 502 });
   }
 
-  const transcript: ChatMessage[] = [...history, { role: "assistant", content: reply }];
-  return Response.json({ reply, token: signer.sign(transcript) });
+  // Errors before the stream starts come back as plain JSON.
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => ({}));
+    // JSON.stringify: the dev log shows nested error objects as {}
+    console.error(`OpenRouter error (HTTP ${response.status}):`, JSON.stringify(data.error ?? data));
+    if (response.status === 429 || data.error?.code === 429) {
+      // retryable: upstream pools free up within seconds, unlike the daily cap above
+      return Response.json({ error: "The twin is busy right now. Try again in a minute.", retryable: true }, { status: 503 });
+    }
+    return Response.json({ error: UNREACHABLE }, { status: 502 });
+  }
+  const upstreamBody = response.body;
+  const question = messages[messages.length - 1].content;
+
+  // Shared with cancel(): once the visitor disconnects, the controller must not be touched again.
+  let open = true;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      const send = (event: StreamEvent) => {
+        if (open) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+      const finish = () => {
+        if (open) controller.close();
+        open = false;
+        upstream.abort();
+      };
+
+      // Every chunk is re-checked as a whole: the leak detector sees the full text so far, and
+      // anything not yet safe to show (open <think>, half a tag) is held back.
+      let raw = "";
+      let shown = "";
+      let leaked = false;
+      try {
+        for await (const chunk of openRouterChunks(upstreamBody)) {
+          if ("error" in chunk) {
+            console.error(`OpenRouter stream error (${chunk.code ?? "?"}):`, chunk.error);
+            send({ type: "error", error: chunk.code === 429 ? "The twin is busy right now. Try again in a minute." : UNREACHABLE });
+            return finish();
+          }
+          raw += chunk.text;
+          const visible = visibleSoFar(raw);
+          if (leaksPrompt(visible)) {
+            leaked = true;
+            break;
+          }
+          if (visible.length > MAX_REPLY_CHARS) break;
+          if (visible.startsWith(shown)) {
+            if (visible.length > shown.length) send({ type: "delta", text: visible.slice(shown.length) });
+          } else {
+            send({ type: "replace", text: visible });
+          }
+          shown = visible;
+        }
+      } catch (err) {
+        if (!open || request.signal.aborted) return finish();
+        console.error("OpenRouter stream failed:", err);
+        send({ type: "error", error: UNREACHABLE });
+        return finish();
+      }
+
+      upstream.abort();
+      let reply = leaked ? REFUSAL : stripThinking(raw);
+      if (!reply) {
+        send({ type: "error", error: "The twin went quiet on that one. Try rephrasing." });
+        return finish();
+      }
+      if (reply.length > MAX_REPLY_CHARS) reply = `${reply.slice(0, MAX_REPLY_CHARS - 1).trimEnd()}…`;
+      if (reply !== REFUSAL && leaksPrompt(reply)) reply = REFUSAL;
+      if (reply !== REFUSAL) {
+        send({ type: "checking" });
+        if (await moderate(question, reply)) reply = REFUSAL;
+      }
+
+      if (reply !== shown) send({ type: "replace", text: reply });
+      const transcript: ChatMessage[] = [...history, { role: "assistant", content: reply }];
+      send({ type: "done", reply, token: signer.sign(transcript) });
+      finish();
+    },
+    cancel() {
+      open = false;
+      upstream.abort();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      // Stops proxies such as nginx from buffering the whole stream.
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

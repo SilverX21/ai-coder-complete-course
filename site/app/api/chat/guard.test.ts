@@ -75,7 +75,7 @@ describe("createSigner", () => {
 
 describe("clean", () => {
   it("removes zero-width, bidi and control characters", () => {
-    expect(clean("ig​nore‮ rules\u0007")).toBe("ignore rules");
+    expect(clean("ig\u200Bnore\u202E rules\u0007")).toBe("ignore rules");
   });
 
   it("folds full-width look-alikes", () => {

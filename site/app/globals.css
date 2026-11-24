@@ -1141,6 +1141,12 @@ body::after {
 .twin-typing {
   color: var(--steel-light);
 }
+.twin-status {
+  justify-self: start;
+  margin: -4px 0 0;
+  font-size: 0.75rem;
+  color: var(--steel-light);
+}
 .twin-msg-error {
   justify-self: start;
   color: var(--signal);
