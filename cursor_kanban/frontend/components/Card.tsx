@@ -3,15 +3,7 @@
 import type { Card as CardType } from "@/lib/types";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import {
-  useEffect,
-  useState,
-  type CSSProperties,
-  type FormEvent,
-  type KeyboardEvent,
-  type MouseEvent,
-  type ReactNode,
-} from "react";
+import { useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { useBoard } from "./BoardProvider";
 import { useView } from "./ViewContext";
 
@@ -64,13 +56,6 @@ export function Card({ card }: CardProps) {
     data: { type: "card", card },
     disabled: editing,
   });
-
-  useEffect(() => {
-    if (!editing) {
-      setTitle(card.title);
-      setDetails(card.details);
-    }
-  }, [card.title, card.details, editing]);
 
   function startEdit(e: MouseEvent) {
     e.stopPropagation();

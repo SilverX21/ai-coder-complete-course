@@ -12,13 +12,25 @@ import {
   type DragOverEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useBoard } from "./BoardProvider";
 import { CardPreview } from "./Card";
 import { Column } from "./Column";
 import { ListView } from "./ListView";
 import { ViewProvider, type Density, type ViewMode } from "./ViewContext";
 import { ViewToolbar } from "./ViewToolbar";
+
+function subscribeToNothing() {
+  return () => {};
+}
+
+function clientMounted() {
+  return true;
+}
+
+function serverMounted() {
+  return false;
+}
 
 function findColumnIdByCardId(columns: { id: string; cards: { id: string }[] }[], cardId: string): string | null {
   for (const column of columns) {
@@ -35,11 +47,7 @@ export function Board() {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [density, setDensity] = useState<Density>("comfortable");
   // Avoid SSR mismatch from @dnd-kit auto-generated aria IDs
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const mounted = useSyncExternalStore(subscribeToNothing, clientMounted, serverMounted);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
